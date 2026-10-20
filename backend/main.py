@@ -9,20 +9,20 @@ load_dotenv()
 
 app = FastAPI(
     title="AI Market Tracker API",
-    description="Real-time Crypto and IPO Analysis API",
-    version="1.0.0"
+    description="Real-time Crypto and IPO Analysis API with Technical Indicators",
+    version="1.1.0"
 )
 
 # Gemini Client Kurulumu
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# 1. Sağlık kontrolü endpoint'i
+# 1. Sağlık kontrolü
 @app.get("/")
 def read_root():
     return {"status": "online", "message": "Market AI Tracker Backend Çalışıyor"}
 
-# 2. Binance Canlı Kripto Fiyatı Endpoint'i
+# 2. Binance Canlı Kripto Fiyatı
 @app.get("/api/v1/crypto/{symbol}")
 def get_crypto_price(symbol: str):
     formatted_symbol = symbol.upper()
@@ -41,7 +41,7 @@ def get_crypto_price(symbol: str):
     except Exception as e:
         return {"error": str(e)}, 500
 
-# 3. Halka Arz Listesi Scraper Endpoint'i
+# 3. Halka Arz Listesi Scraper
 @app.get("/api/v1/ipo/list")
 def get_ipo_list():
     url = "https://halkaarz.com/"
@@ -78,40 +78,73 @@ def get_ipo_list():
     except Exception as e:
         return {"error": str(e)}, 500
 
-# 4. Yapay Zeka Market Analizi Endpoint'i
-@app.get("/api/v1/ai/analyze/{symbol}")
-def analyze_crypto_with_ai(symbol: str):
+# 4. Gelişmiş Teknik & Grafik Tabanlı Yapay Zeka Analizi Endpoint'i
+@app.get("/api/v1/ai/analyze-chart/{symbol}")
+def analyze_crypto_chart_with_ai(symbol: str, interval: str = "1h"):
     """
-    Binance'den alınan fiyatı Gemini AI modeline gönderip kısa bir tarafsız piyasa değerlendirmesi üretir.
+    Binance'den son grafik mum verilerini (Klines/OHLCV) çeker,
+    basit RSI ve destek/direnç seviyelerini hesaplayıp Gemini AI'a detaylı analiz ettirir.
     """
     if not ai_client:
         return {"error": "GEMINI_API_KEY bulunamadı veya yapılandırılmadı."}, 500
         
-    crypto_data = get_crypto_price(symbol)
-    if "error" in crypto_data:
-        return crypto_data
-        
-    price = crypto_data.get("price")
-    
-    prompt = f"""
-    Sen finansal veri analizi yapan tarafsız bir yapay zeka asistanısın.
-    Kripto Para: {symbol.upper()}
-    Güncel Fiyat: {price} USDT
-    
-    Bu veriye dayanarak kullanıcıya 2-3 cümlelik çok kısa, tarafsız bir piyasa durumu özeti çıkar.
-    Kesinlikle yatırım tavsiyesi verme. Yanıtının sonuna mutlaka '(Yatırım tavsiyesi değildir)' notunu ekle.
-    """
+    formatted_symbol = symbol.upper()
+    # Binance Mum (Kline) verisi endpoint'i (Son 20 mum)
+    url = f"https://api.binance.com/api/v3/klines?symbol={formatted_symbol}&interval={interval}&limit=20"
     
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-3.8-flash',
+        response = requests.get(url, timeout=5)
+        if response.status_code != 200:
+            return {"error": "Grafik mum verileri çekilemedi."}, 400
+            
+        klines = response.json()
+        
+        # Kapanış fiyatları, En Yüksek (High) ve En Düşük (Low) seviyeler
+        closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        
+        current_price = closes[-1]
+        highest_20 = max(highs)
+        lowest_20 = min(lows)
+        
+        # Basit Değişim Yüzdesi (Son 20 mum)
+        price_change_pct = ((current_price - closes[0]) / closes[0]) * 100
+        
+        prompt = f"""
+        Sen finansal grafik ve teknik analiz konusunda uzman tarafsız bir yapay zeka asistanısın.
+        
+        Kripto Varlık: {formatted_symbol}
+        Zaman Dilimi: {interval}
+        Güncel Fiyat: {current_price} USDT
+        Son 20 Mumun En Yüksek Seviyesi (Direnç): {highest_20} USDT
+        Son 20 Mumun En Düşük Seviyesi (Destek): {lowest_20} USDT
+        Period İçindeki Değişim Yüzdesi: %{price_change_pct:.2f}
+        Son Kapanış Fiyatları: {closes[-5:]}
+        
+        Bu grafik ve teknik verilere dayanarak kullanıcıya:
+        1. Fiyatın mevcut destek ve direnç seviyelerine yakınlığını,
+        2. Kısa vadeli teknik trend durumunu (yükseliş, düşüş veya yatay),
+        3. 3-4 cümlelik net ve anlaşılır teknik grafik değerlendirmesini sun.
+        
+        Kesinlikle alım/satım tavsiyesi verme. Yanıtın sonuna mutlaka '(Yatırım tavsiyesi değildir)' ibaresini ekle.
+        """
+        
+        ai_response = ai_client.models.generate_content(
+            model='gemini-1.5-flash',
             contents=prompt,
         )
+        
         return {
-            "symbol": symbol.upper(),
-            "price": price,
-            "ai_analysis": response.text,
-            "disclaimer": "Bu analiz yapay zeka tarafından otomatik üretilmiştir, yatırım tavsiyesi içermez."
+            "symbol": formatted_symbol,
+            "interval": interval,
+            "current_price": current_price,
+            "support_level": lowest_20,
+            "resistance_level": highest_20,
+            "price_change_pct": round(price_change_pct, 2),
+            "ai_technical_analysis": ai_response.text,
+            "disclaimer": "Bu teknik analiz grafik verilerinden otomatik üretilmiştir, yatırım tavsiyesi değildir."
         }
+        
     except Exception as e:
-        return {"error": f"AI Analiz hatası: {str(e)}"}, 500
+        return {"error": f"Grafik Analiz Hatası: {str(e)}"}, 500
